@@ -52,6 +52,7 @@
       </select>
     </label>
     <span class="hidden md:inline-block w-px h-6 bg-slate-600 mx-1"></span>
+    <button id="presenterBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium" title="Open Presenter Console (current slide, next, timer, notes)">🎤 Presenter</button>
     <button id="copyBtn"   class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">📋 Copy Markdown</button>
     <button id="pdfBtn"    class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">🖨️ Print to PDF</button>
     <button id="exportBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-semibold">⬇ Export Offline HTML</button>
@@ -76,7 +77,22 @@
       </div>
     </div>
     <textarea id="editor" spellcheck="false"
-      class="flex-1 w-full p-4 bg-slate-900 text-slate-100 outline-none"></textarea>
+      class="w-full p-4 bg-slate-900 text-slate-100 outline-none" style="flex: 1 1 65%;"></textarea>
+
+    <!-- Speaker notes pane -->
+    <div class="flex flex-col" style="flex: 0 0 35%; min-height: 140px;">
+      <div class="flex items-center justify-between px-3 py-2 border-y border-slate-700 bg-slate-800">
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium text-slate-200">📝 Speaker Notes</span>
+          <span class="text-[11px] text-slate-500">written as <code class="text-slate-400">Note:</code> in the slide</span>
+        </div>
+        <span id="notesLabel" class="text-xs text-slate-400 tabular-nums">Slide 1 of 1</span>
+      </div>
+      <textarea id="notesEditor" spellcheck="false"
+        placeholder="Notes for the slide your cursor is on. Auto-synced into the markdown above."
+        class="flex-1 w-full p-4 bg-slate-950 text-slate-100 outline-none"
+        style="font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; resize: none;"></textarea>
+    </div>
   </section>
 
   <!-- Preview -->
@@ -121,20 +137,27 @@ Press → or Space to advance
 
 ---
 
-## Code blocks just work
+## Code blocks, animated
 
-\`\`\`js
+<small>The numbers in brackets step through line highlights as you press →</small>
+
+\`\`\`js [1-3|4-5|all]
 function greet(name) {
   return \`Hello, \${name}!\`;
 }
-console.log(greet('world'));
+const result = greet('world');
+console.log(result);
 \`\`\`
+
+Note: Walk through the function definition first, then show the call site, then zoom out. Reveal will step the highlight on each arrow press.
 
 --
 
 ### Vertical slide
 
 Press ↓ to navigate down, then → to continue.
+
+Note: This is a vertical sub-slide. Useful for optional deep-dives.
 
 ---
 
@@ -158,14 +181,19 @@ const slideEl      = $('slideCount');
 const syncToggle   = $('syncToggle');
 const themeSelect  = $('themeSelect');
 const fileFallback = $('fileFallback');
+const notesEditor  = $('notesEditor');
+const notesLabel   = $('notesLabel');
 
 const VALID_THEMES = ['black', 'white', 'league', 'serif'];
 const themeUrl = (name) =>
   `https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/${name}.css`;
 
-let currentBlobUrl = null;
-let renderTimer    = null;
-let currentTheme   = 'black';
+let currentBlobUrl   = null;
+let renderTimer      = null;
+let currentTheme     = 'black';
+let currentSlideIdx  = 0;
+let suppressNotesIn  = false;  // re-entry guard: ignore main-editor change events while we're rewriting it
+let suppressNotesOut = false;  // re-entry guard: ignore notes change events while we're populating them
 
 /* Build a complete, standalone HTML document that renders the deck.
  * Used for: the live preview iframe, the Print-to-PDF window, and the
@@ -248,6 +276,107 @@ function updateStats() {
   slideEl.textContent = String(horizontal + 1);
 }
 
+/* Speaker notes — slide parsing & two-way sync ------------------- *
+ *
+ * Convention (matches Reveal): a slide is everything between bare
+ * `---` lines; within a slide, a line starting with `Note:` marks
+ * the beginning of speaker notes (everything from that line to the
+ * end of the slide).
+ */
+function findSlideBounds(md) {
+  const sepRe = /^---\s*$/gm;
+  const seps = [];
+  let m;
+  while ((m = sepRe.exec(md)) !== null) {
+    seps.push({ start: m.index, end: m.index + m[0].length });
+  }
+  const bounds = [];
+  let prevEnd = 0;
+  for (const s of seps) {
+    bounds.push({ start: prevEnd, end: s.start });
+    prevEnd = s.end;
+  }
+  bounds.push({ start: prevEnd, end: md.length });
+  return bounds;
+}
+
+function extractNotesFromSlide(text) {
+  const re = /(^|\n)Note:[ \t]*([\s\S]*)$/;
+  const m = text.match(re);
+  if (!m) return { content: text, notes: '' };
+  // contentEnd points just before the matched leading newline (or at 0)
+  const contentEnd = m.index + (m[1] === '\n' ? 0 : 0);
+  return {
+    content: text.slice(0, m.index).replace(/\s+$/, ''),
+    notes: m[2].replace(/\s+$/, '')
+  };
+}
+
+function getCurrentSlideIdx() {
+  const cursor = editor.selectionStart || 0;
+  const before = editor.value.slice(0, cursor);
+  return (before.match(/^---\s*$/gm) || []).length;
+}
+
+function refreshNotesPanel() {
+  if (suppressNotesOut) return;
+  const md = editor.value;
+  const bounds = findSlideBounds(md);
+  const idx = Math.min(currentSlideIdx, bounds.length - 1);
+  const slideText = md.slice(bounds[idx].start, bounds[idx].end);
+  const { notes } = extractNotesFromSlide(slideText);
+  suppressNotesOut = true;
+  notesEditor.value = notes;
+  suppressNotesOut = false;
+  notesLabel.textContent = `Slide ${idx + 1} of ${bounds.length}`;
+}
+
+function writeNotesIntoSlide(idx, rawNotes) {
+  const md = editor.value;
+  const bounds = findSlideBounds(md);
+  if (!bounds[idx]) return;
+  const { start, end } = bounds[idx];
+  const slideText = md.slice(start, end);
+  const { content } = extractNotesFromSlide(slideText);
+
+  const trimmed = rawNotes.replace(/\s+$/, '');
+  let newSlide = content;
+  if (trimmed) newSlide += '\n\nNote: ' + trimmed;
+
+  // Restore the leading/trailing newline padding around the slide
+  // so the surrounding `---` separators stay on their own lines.
+  const leadingNl  = slideText.match(/^\n*/)[0];
+  const trailingNl = slideText.match(/\n*$/)[0];
+  const padded = leadingNl + newSlide.replace(/^\n+/, '').replace(/\n+$/, '') + trailingNl;
+
+  const newMd = md.slice(0, start) + padded + md.slice(end);
+  // Preserve cursor in the main editor (it isn't focused right now,
+  // but jumping it to slide N+1 would be confusing if user clicks back).
+  const cursor = editor.selectionStart;
+  suppressNotesIn = true;
+  editor.value = newMd;
+  editor.selectionStart = editor.selectionEnd = Math.min(cursor, newMd.length);
+  suppressNotesIn = false;
+
+  updateStats();
+  if (syncToggle.checked) {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(renderPreview, 220);
+  }
+}
+
+function trackCursorSlide() {
+  if (suppressNotesIn) return;
+  const idx = getCurrentSlideIdx();
+  if (idx === currentSlideIdx) {
+    // Slide didn't change but content might have — keep label & notes fresh
+    refreshNotesPanel();
+    return;
+  }
+  currentSlideIdx = idx;
+  refreshNotesPanel();
+}
+
 /* Debounced re-render driven by typing + the Sync toggle. */
 function scheduleRender() {
   updateStats();
@@ -256,7 +385,18 @@ function scheduleRender() {
   renderTimer = setTimeout(renderPreview, 220);
 }
 
-editor.addEventListener('input', scheduleRender);
+editor.addEventListener('input', () => {
+  scheduleRender();
+  trackCursorSlide();
+});
+editor.addEventListener('keyup',  trackCursorSlide);
+editor.addEventListener('click',  trackCursorSlide);
+editor.addEventListener('select', trackCursorSlide);
+
+notesEditor.addEventListener('input', () => {
+  writeNotesIntoSlide(currentSlideIdx, notesEditor.value);
+});
+
 syncToggle.addEventListener('change', () => {
   if (syncToggle.checked) renderPreview();
 });
@@ -314,7 +454,9 @@ fileFallback.addEventListener('change', async () => {
 
 function loadFileText(text, name) {
   editor.value = text;
+  currentSlideIdx = 0;
   updateStats();
+  refreshNotesPanel();
   renderPreview();
   flashBtn($('openBtn'), `✓ ${name.length > 18 ? name.slice(0,15) + '…' : name}`);
 }
@@ -363,6 +505,203 @@ $('exportBtn').addEventListener('click', () => {
   flashBtn($('exportBtn'), '✓ Downloaded!');
 });
 
+/* Presenter Console ----------------------------------------------- *
+ *
+ * Opens a new window containing two iframes (current + next slide
+ * preview) plus a sidebar with a stopwatch and the current slide's
+ * speaker notes. The presenter window is same-origin with the editor
+ * (both Blob URLs created here), so we can drive the deck iframes
+ * with direct DOM/Reveal calls — no postMessage plumbing needed.
+ */
+function buildPresenterShell(deckUrl, theme) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Presenter Console</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0a0a0a; color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: #111827; border-bottom: 1px solid #1f2937; }
+  header .title { font-weight: 600; letter-spacing: 0.02em; }
+  .timer { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 28px;
+    color: #34d399; min-width: 100px; text-align: center; }
+  .controls button {
+    background: #374151; color: #f3f4f6; border: 0; border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; margin-left: 6px; cursor: pointer;
+    transition: background 120ms;
+  }
+  .controls button:hover { background: #4b5563; }
+  .controls button.primary { background: #10b981; color: #0a0a0a; font-weight: 600; }
+  .controls button.primary:hover { background: #34d399; }
+  main { flex: 1; display: grid; grid-template-columns: 1.55fr 1fr;
+    gap: 8px; padding: 8px; min-height: 0; }
+  .pane { background: #111827; border: 1px solid #1f2937; border-radius: 8px;
+    display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .pane-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 6px 10px; background: #0f172a; color: #94a3b8;
+    border-bottom: 1px solid #1f2937; flex: 0 0 auto; }
+  .pane iframe { flex: 1; width: 100%; border: 0; background: #000; min-height: 0; }
+  .right { display: grid; grid-template-rows: 1fr 1fr; gap: 8px; min-height: 0; }
+  #notes { flex: 1; padding: 18px 22px; overflow: auto;
+    font-size: 17px; line-height: 1.55; }
+  #notes p { margin: 0 0 12px 0; }
+  #notes code { background: #1f2937; padding: 1px 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+  #notes pre { background: #1f2937; padding: 10px 12px; border-radius: 4px;
+    overflow: auto; }
+  .empty { color: #64748b; font-style: italic; }
+  footer { padding: 6px 16px; background: #0f172a; color: #64748b; font-size: 11px;
+    border-top: 1px solid #1f2937; text-align: center; }
+  kbd { background: #1f2937; padding: 1px 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">🎤 Presenter Console <span style="color:#64748b; font-weight:400; margin-left:8px;">${theme} theme</span></div>
+  <div class="timer" id="timer">00:00</div>
+  <div class="controls">
+    <button id="startBtn" class="primary">▶ Start</button>
+    <button id="resetBtn">↺ Reset</button>
+    <button id="prevBtn">←</button>
+    <button id="nextBtn">→</button>
+  </div>
+</header>
+<main>
+  <section class="pane">
+    <div class="pane-label">Current slide</div>
+    <iframe id="currentDeck" src="${deckUrl}"></iframe>
+  </section>
+  <aside class="right">
+    <section class="pane">
+      <div class="pane-label">Up next</div>
+      <iframe id="nextDeck" src="${deckUrl}"></iframe>
+    </section>
+    <section class="pane">
+      <div class="pane-label">Speaker notes</div>
+      <div id="notes"><p class="empty">Loading…</p></div>
+    </section>
+  </aside>
+</main>
+<footer>
+  <kbd>←</kbd> / <kbd>→</kbd> navigate · <kbd>Space</kbd> next · <kbd>F</kbd> fullscreen the current pane
+</footer>
+<script>
+  const cur  = document.getElementById('currentDeck');
+  const nxt  = document.getElementById('nextDeck');
+  const notesEl = document.getElementById('notes');
+  const timerEl = document.getElementById('timer');
+
+  /* Stopwatch */
+  let elapsed = 0, running = false, lastTick = 0, rafId = null;
+  function fmt(s) {
+    const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), x = s%60;
+    return (h ? String(h).padStart(2,'0') + ':' : '')
+         + String(m).padStart(2,'0') + ':' + String(x).padStart(2,'0');
+  }
+  function tick() {
+    if (!running) return;
+    const now = Date.now();
+    elapsed += (now - lastTick) / 1000;
+    lastTick = now;
+    timerEl.textContent = fmt(Math.floor(elapsed));
+    rafId = requestAnimationFrame(tick);
+  }
+  document.getElementById('startBtn').addEventListener('click', () => {
+    if (running) { running = false; document.getElementById('startBtn').textContent = '▶ Resume'; }
+    else { running = true; lastTick = Date.now(); document.getElementById('startBtn').textContent = '⏸ Pause'; tick(); }
+  });
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    running = false; elapsed = 0;
+    document.getElementById('startBtn').textContent = '▶ Start';
+    timerEl.textContent = fmt(0);
+  });
+
+  /* Deck wiring */
+  function whenReady(iframe) {
+    return new Promise((resolve) => {
+      const check = () => {
+        const w = iframe.contentWindow;
+        if (w && w.Reveal && w.Reveal.isReady && w.Reveal.isReady()) resolve(w.Reveal);
+        else setTimeout(check, 60);
+      };
+      iframe.addEventListener('load', check);
+      check();
+    });
+  }
+  function renderNotes(slide) {
+    if (!slide) { notesEl.innerHTML = '<p class="empty">End of deck.</p>'; return; }
+    const aside = slide.querySelector('aside.notes');
+    if (aside && aside.innerHTML.trim()) {
+      notesEl.innerHTML = aside.innerHTML;
+    } else {
+      notesEl.innerHTML = '<p class="empty">No notes for this slide.</p>';
+    }
+  }
+  function syncFromCurrent(curReveal, nxtReveal) {
+    const i = curReveal.getIndices();
+    renderNotes(curReveal.getCurrentSlide());
+    // Advance the "next" iframe one slide ahead (vertical first, fallback horizontal)
+    const totalH = curReveal.getTotalSlides();
+    const target = curReveal.availableRoutes && curReveal.availableRoutes().down
+      ? { h: i.h, v: (i.v || 0) + 1 }
+      : { h: i.h + 1, v: 0 };
+    nxtReveal.slide(target.h, target.v);
+  }
+
+  Promise.all([whenReady(cur), whenReady(nxt)]).then(([curReveal, nxtReveal]) => {
+    curReveal.on('slidechanged', () => syncFromCurrent(curReveal, nxtReveal));
+    syncFromCurrent(curReveal, nxtReveal);
+
+    /* Navigation: keys + buttons drive the current deck. */
+    const next = () => curReveal.next();
+    const prev = () => curReveal.prev();
+    document.getElementById('nextBtn').addEventListener('click', next);
+    document.getElementById('prevBtn').addEventListener('click', prev);
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); next(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp')                  { e.preventDefault(); prev(); }
+      else if (e.key === 'f' || e.key === 'F')                                { cur.requestFullscreen?.(); }
+    });
+  });
+
+  /* Revoke the deck Blob URL on close so memory is reclaimed. */
+  window.addEventListener('beforeunload', () => {
+    try { URL.revokeObjectURL(${JSON.stringify(deckUrl)}); } catch {}
+  });
+<\/script>
+</body>
+</html>`;
+}
+
+$('presenterBtn').addEventListener('click', () => {
+  const deckHtml = buildPreviewDoc(editor.value);
+  const deckBlob = new Blob([deckHtml], { type: 'text/html;charset=utf-8' });
+  const deckUrl  = URL.createObjectURL(deckBlob);
+
+  const shellHtml = buildPresenterShell(deckUrl, currentTheme);
+  const shellBlob = new Blob([shellHtml], { type: 'text/html;charset=utf-8' });
+  const shellUrl  = URL.createObjectURL(shellBlob);
+
+  const win = window.open(shellUrl, '_blank',
+    'popup,width=1280,height=800,left=120,top=80');
+  if (!win) {
+    URL.revokeObjectURL(deckUrl);
+    URL.revokeObjectURL(shellUrl);
+    alert('Please allow pop-ups so the Presenter Console can open.');
+    return;
+  }
+  // Revoke the shell URL once the window has parsed it. The shell
+  // revokes the deck URL itself in its beforeunload handler.
+  setTimeout(() => URL.revokeObjectURL(shellUrl), 5000);
+  flashBtn($('presenterBtn'), '✓ Opened');
+});
+
 /* Tiny visual confirmation on a button after an action. */
 function flashBtn(btn, text) {
   const original = btn.textContent;
@@ -379,6 +718,7 @@ function flashBtn(btn, text) {
 /* Boot ------------------------------------------------------------- */
 editor.value = SAMPLE;
 updateStats();
+refreshNotesPanel();
 renderPreview();
 </script>
 </body>
