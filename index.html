@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Markdown Slideshow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { height: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #editor {
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13.5px;
+    line-height: 1.55;
+    tab-size: 2;
+    resize: none;
+  }
+  #editor::selection { background: rgba(16, 185, 129, 0.35); }
+  .btn { transition: background-color 120ms, transform 120ms; }
+  .btn:active { transform: translateY(1px); }
+  .pulse-ok { animation: pulseOk 1.2s ease; }
+  @keyframes pulseOk {
+    0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
+    100% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
+  }
+  /* Hide scrollbar styling polish */
+  textarea::-webkit-scrollbar { width: 10px; }
+  textarea::-webkit-scrollbar-thumb { background: #334155; border-radius: 5px; }
+  textarea::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body class="h-screen flex flex-col bg-slate-900 text-slate-100 overflow-hidden">
+
+<header class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b border-slate-700 bg-slate-800/70 backdrop-blur">
+  <div class="flex items-center gap-3">
+    <span class="text-2xl leading-none">🎞️</span>
+    <h1 class="text-lg font-semibold tracking-tight">Markdown Slideshow</h1>
+    <span class="hidden sm:inline-block text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+      Offline · $0 · No backend
+    </span>
+  </div>
+  <div class="flex flex-wrap items-center gap-2">
+    <button id="copyBtn"   class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">📋 Copy Markdown</button>
+    <button id="pdfBtn"    class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">🖨️ Print to PDF</button>
+    <button id="exportBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-semibold">⬇ Export Offline HTML</button>
+  </div>
+</header>
+
+<main class="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-3 p-3 min-h-0">
+
+  <!-- Editor -->
+  <section class="flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-700 bg-slate-800/40">
+    <div class="flex items-center justify-between px-3 py-2 border-b border-slate-700 bg-slate-800">
+      <div class="flex items-center gap-4 text-sm">
+        <span class="font-medium text-slate-200">Editor</span>
+        <label class="inline-flex items-center gap-2 cursor-pointer select-none text-slate-300">
+          <input id="syncToggle" type="checkbox" checked class="accent-emerald-500 w-4 h-4">
+          <span>Real-time Sync</span>
+        </label>
+      </div>
+      <div class="text-xs text-slate-400 tabular-nums">
+        <span id="charCount">0</span> chars · <span id="slideCount">0</span> slides
+      </div>
+    </div>
+    <textarea id="editor" spellcheck="false"
+      class="flex-1 w-full p-4 bg-slate-900 text-slate-100 outline-none"></textarea>
+  </section>
+
+  <!-- Preview -->
+  <section class="flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-700">
+    <div class="flex items-center justify-between px-3 py-2 border-b border-slate-700 bg-slate-800">
+      <span class="text-sm font-medium text-slate-200">Preview</span>
+      <button id="refreshBtn" class="text-xs text-slate-400 hover:text-slate-100">↻ Refresh</button>
+    </div>
+    <iframe id="preview" title="Slide preview" class="flex-1 w-full bg-black border-0"></iframe>
+  </section>
+
+</main>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * Markdown Slideshow — single-file app
+ * ------------------------------------------------------------------ */
+
+const SAMPLE = `# Markdown Slideshow
+
+Type Markdown → get slides.
+No install · No signup · No fees.
+
+Press → or Space to advance
+
+---
+
+## How separators work
+
+- \`---\` on its own line starts a **new slide**
+- \`--\` on its own line starts a **vertical sub-slide**
+- Everything else is plain Markdown
+
+---
+
+## Lists & emphasis
+
+- **Bold** with \`**...**\`
+- *Italic* with \`*...*\`
+- \`inline code\` with backticks
+- Combine them however you like
+
+---
+
+## Code blocks just work
+
+\`\`\`js
+function greet(name) {
+  return \`Hello, \${name}!\`;
+}
+console.log(greet('world'));
+\`\`\`
+
+--
+
+### Vertical slide
+
+Press ↓ to navigate down, then → to continue.
+
+---
+
+## Three actions, top-right
+
+- ⬇ **Export Offline HTML** — share one file, anywhere
+- 🖨️ **Print to PDF** — for handouts
+- 📋 **Copy Markdown** — paste into any editor
+
+---
+
+# That's it. ✨
+
+Happy presenting.`;
+
+const $ = (id) => document.getElementById(id);
+const editor      = $('editor');
+const preview     = $('preview');
+const charCountEl = $('charCount');
+const slideEl     = $('slideCount');
+const syncToggle  = $('syncToggle');
+
+let currentBlobUrl = null;
+let renderTimer    = null;
+
+/* Build a complete, standalone HTML document that renders the deck.
+ * Used for: the live preview iframe, the Print-to-PDF window, and the
+ * Export Offline HTML download — exactly the same CDN bundle every time.
+ */
+function buildPreviewDoc(markdown, { printMode = false } = {}) {
+  // The Markdown is embedded in a <textarea data-template>. The only
+  // sequence that could break out of it is "</textarea>". Escape it.
+  const safeMd = String(markdown).replace(/<\/textarea>/gi, '<\\/textarea>');
+
+  // Reveal's print stylesheet — applied always-on in print mode, or
+  // gated by media="print" so normal preview is untouched.
+  const printLink = printMode
+    ? `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/css/print/pdf.css">`
+    : `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/css/print/pdf.css" media="print">`;
+
+  const autoPrint = printMode
+    ? `.then(() => setTimeout(() => window.print(), 700))`
+    : ``;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slides</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reset.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/black.css" id="theme">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/monokai.css">
+${printLink}
+<style>html,body{background:#191919;}</style>
+</head>
+<body${printMode ? ' class="print-pdf"' : ''}>
+<div class="reveal">
+  <div class="slides">
+    <section data-markdown
+             data-separator="^---$"
+             data-separator-vertical="^--$"
+             data-separator-notes="^Note:">
+      <textarea data-template>
+${safeMd}
+      </textarea>
+    </section>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/markdown/markdown.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/highlight.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/notes/notes.js"><\/script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+  })${autoPrint};
+<\/script>
+</body>
+</html>`;
+}
+
+/* Re-render the preview iframe with the current Markdown. */
+function renderPreview() {
+  const html = buildPreviewDoc(editor.value);
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url  = URL.createObjectURL(blob);
+  if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+  currentBlobUrl = url;
+  preview.src = url;
+}
+
+/* Update char + slide counters in the toolbar. */
+function updateStats() {
+  const text = editor.value;
+  charCountEl.textContent = text.length.toLocaleString();
+  if (!text.trim()) { slideEl.textContent = '0'; return; }
+  const horizontal = (text.match(/^---\s*$/gm) || []).length;
+  slideEl.textContent = String(horizontal + 1);
+}
+
+/* Debounced re-render driven by typing + the Sync toggle. */
+function scheduleRender() {
+  updateStats();
+  if (!syncToggle.checked) return;
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(renderPreview, 220);
+}
+
+editor.addEventListener('input', scheduleRender);
+syncToggle.addEventListener('change', () => {
+  if (syncToggle.checked) renderPreview();
+});
+$('refreshBtn').addEventListener('click', renderPreview);
+
+/* Copy Markdown ---------------------------------------------------- */
+$('copyBtn').addEventListener('click', async () => {
+  const btn = $('copyBtn');
+  try {
+    await navigator.clipboard.writeText(editor.value);
+  } catch {
+    editor.select();
+    document.execCommand('copy');
+    window.getSelection()?.removeAllRanges();
+  }
+  flashBtn(btn, '✓ Copied!');
+});
+
+/* Print to PDF ----------------------------------------------------- */
+$('pdfBtn').addEventListener('click', () => {
+  const html = buildPreviewDoc(editor.value, { printMode: true });
+  const w = window.open('', '_blank');
+  if (!w) {
+    alert('Please allow pop-ups for this page so Print to PDF can open the print view.');
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+});
+
+/* Export Offline HTML --------------------------------------------- */
+$('exportBtn').addEventListener('click', () => {
+  const html = buildPreviewDoc(editor.value);
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href     = url;
+  a.download = `slides-${ts}.html`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  flashBtn($('exportBtn'), '✓ Downloaded!');
+});
+
+/* Tiny visual confirmation on a button after an action. */
+function flashBtn(btn, text) {
+  const original = btn.textContent;
+  btn.textContent = text;
+  btn.disabled = true;
+  btn.classList.add('pulse-ok');
+  setTimeout(() => {
+    btn.textContent = original;
+    btn.disabled = false;
+    btn.classList.remove('pulse-ok');
+  }, 1200);
+}
+
+/* Boot ------------------------------------------------------------- */
+editor.value = SAMPLE;
+updateStats();
+renderPreview();
+</script>
+</body>
+</html>
