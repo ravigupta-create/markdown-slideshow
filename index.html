@@ -51,6 +51,22 @@
         <option value="serif">Serif</option>
       </select>
     </label>
+    <label class="inline-flex items-center gap-2 px-2 py-1 text-sm rounded-md bg-slate-700/60 border border-slate-600">
+      <span class="text-slate-300">Font</span>
+      <select id="fontSelect"
+              class="bg-slate-900 border border-slate-600 rounded px-2 py-0.5 text-slate-100 text-sm focus:outline-none focus:border-emerald-500">
+        <option value="">Theme default</option>
+        <option value="Inter">Inter</option>
+        <option value="Roboto">Roboto</option>
+        <option value="Lato">Lato</option>
+        <option value="Open Sans">Open Sans</option>
+        <option value="Montserrat">Montserrat</option>
+        <option value="Source Sans 3">Source Sans 3</option>
+        <option value="Playfair Display">Playfair Display</option>
+        <option value="Merriweather">Merriweather</option>
+        <option value="JetBrains Mono">JetBrains Mono</option>
+      </select>
+    </label>
     <span class="hidden md:inline-block w-px h-6 bg-slate-600 mx-1"></span>
     <button id="presenterBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium" title="Open Presenter Console (current slide, next, timer, notes)">🎤 Presenter</button>
     <button id="copyBtn"   class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">📋 Copy Markdown</button>
@@ -63,7 +79,7 @@
 <main class="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-3 p-3 min-h-0">
 
   <!-- Editor -->
-  <section class="flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-700 bg-slate-800/40">
+  <section id="editorSection" class="relative flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-700 bg-slate-800/40">
     <div class="flex items-center justify-between px-3 py-2 border-b border-slate-700 bg-slate-800">
       <div class="flex items-center gap-4 text-sm">
         <span class="font-medium text-slate-200">Editor</span>
@@ -71,9 +87,17 @@
           <input id="syncToggle" type="checkbox" checked class="accent-emerald-500 w-4 h-4">
           <span>Real-time Sync</span>
         </label>
+        <span class="hidden xl:inline text-[11px] text-slate-500">drop an image anywhere to insert as base64 →</span>
       </div>
       <div class="text-xs text-slate-400 tabular-nums">
         <span id="charCount">0</span> chars · <span id="slideCount">0</span> slides
+      </div>
+    </div>
+
+    <!-- Drag-and-drop overlay (hidden until a file is dragged in) -->
+    <div id="dropOverlay" class="hidden absolute inset-0 z-20 pointer-events-none flex items-center justify-center bg-emerald-500/15 backdrop-blur-[1px] border-2 border-dashed border-emerald-400 rounded-lg">
+      <div class="text-emerald-100 text-base font-medium px-5 py-3 rounded-lg bg-emerald-500/30 border border-emerald-400 shadow-lg">
+        🖼️ Drop image to embed as <code class="bg-emerald-700/40 px-1 rounded">![](data:…)</code>
       </div>
     </div>
     <textarea id="editor" spellcheck="false"
@@ -161,6 +185,24 @@ Note: This is a vertical sub-slide. Useful for optional deep-dives.
 
 ---
 
+## Math, native
+
+Inline like $E = mc^2$, or block:
+
+$$
+\\int_0^{\\infty} e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}
+$$
+
+Note: KaTeX renders \`$...$\` and \`$$...$$\` automatically.
+
+---
+
+## Images, just drop them
+
+Drag any **PNG**, **JPG**, **GIF**, or **SVG** into the editor — it gets inlined as base64 and stays inside your single file.
+
+---
+
 ## Three actions, top-right
 
 - ⬇ **Export Offline HTML** — share one file, anywhere
@@ -174,33 +216,54 @@ Note: This is a vertical sub-slide. Useful for optional deep-dives.
 Happy presenting.`;
 
 const $ = (id) => document.getElementById(id);
-const editor       = $('editor');
-const preview      = $('preview');
-const charCountEl  = $('charCount');
-const slideEl      = $('slideCount');
-const syncToggle   = $('syncToggle');
-const themeSelect  = $('themeSelect');
-const fileFallback = $('fileFallback');
-const notesEditor  = $('notesEditor');
-const notesLabel   = $('notesLabel');
+const editor        = $('editor');
+const preview       = $('preview');
+const charCountEl   = $('charCount');
+const slideEl       = $('slideCount');
+const syncToggle    = $('syncToggle');
+const themeSelect   = $('themeSelect');
+const fontSelect    = $('fontSelect');
+const fileFallback  = $('fileFallback');
+const notesEditor   = $('notesEditor');
+const notesLabel    = $('notesLabel');
+const editorSection = $('editorSection');
+const dropOverlay   = $('dropOverlay');
 
 const VALID_THEMES = ['black', 'white', 'league', 'serif'];
 const themeUrl = (name) =>
   `https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/${name}.css`;
 
+const VALID_FONTS = ['Inter','Roboto','Lato','Open Sans','Montserrat',
+                     'Source Sans 3','Playfair Display','Merriweather','JetBrains Mono'];
+const fontUrl = (name) =>
+  `https://fonts.googleapis.com/css2?family=${encodeURIComponent(name).replace(/%20/g,'+')}:wght@400;600;700&display=swap`;
+
+/* CSS that applies the chosen font to slide chrome but not to code. */
+const fontOverrideCss = (name) => name
+  ? `.reveal, .reveal h1, .reveal h2, .reveal h3, .reveal h4, .reveal h5, .reveal h6,
+     .reveal p, .reveal li, .reveal blockquote, .reveal section { font-family: '${name}', sans-serif !important; }`
+  : ``;
+
 let currentBlobUrl   = null;
 let renderTimer      = null;
 let currentTheme     = 'black';
+let currentFont      = '';
 let currentSlideIdx  = 0;
 let suppressNotesIn  = false;  // re-entry guard: ignore main-editor change events while we're rewriting it
 let suppressNotesOut = false;  // re-entry guard: ignore notes change events while we're populating them
+let dragDepth        = 0;      // tracks dragenter/leave nesting so the overlay only hides on real exit
 
 /* Build a complete, standalone HTML document that renders the deck.
  * Used for: the live preview iframe, the Print-to-PDF window, and the
  * Export Offline HTML download — exactly the same CDN bundle every time.
  */
-function buildPreviewDoc(markdown, { printMode = false, theme = currentTheme } = {}) {
+function buildPreviewDoc(markdown, { printMode = false, theme = currentTheme, font = currentFont } = {}) {
   const safeTheme = VALID_THEMES.includes(theme) ? theme : 'black';
+  const safeFont  = VALID_FONTS.includes(font) ? font : '';
+  const fontLink  = safeFont
+    ? `<link rel="stylesheet" id="font-link" href="${fontUrl(safeFont)}">`
+    : `<link rel="stylesheet" id="font-link" href="">`;
+  const fontStyle = `<style id="font-style">${fontOverrideCss(safeFont)}</style>`;
   // The Markdown is embedded in a <textarea data-template>. The only
   // sequence that could break out of it is "</textarea>". Escape it.
   const safeMd = String(markdown).replace(/<\/textarea>/gi, '<\\/textarea>');
@@ -210,10 +273,6 @@ function buildPreviewDoc(markdown, { printMode = false, theme = currentTheme } =
   const printLink = printMode
     ? `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/css/print/pdf.css">`
     : `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/css/print/pdf.css" media="print">`;
-
-  const autoPrint = printMode
-    ? `.then(() => setTimeout(() => window.print(), 700))`
-    : ``;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -225,6 +284,9 @@ function buildPreviewDoc(markdown, { printMode = false, theme = currentTheme } =
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
 <link rel="stylesheet" href="${themeUrl(safeTheme)}" id="theme">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/monokai.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+${fontLink}
+${fontStyle}
 ${printLink}
 </head>
 <body${printMode ? ' class="print-pdf"' : ''}>
@@ -245,13 +307,36 @@ ${safeMd}
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/markdown/markdown.js"><\/script>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/highlight.js"><\/script>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/notes/notes.js"><\/script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"><\/script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"><\/script>
 <script>
   Reveal.initialize({
     hash: true,
     slideNumber: 'c/t',
     transition: 'slide',
     plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
-  })${autoPrint};
+  }).then(() => {
+    /* KaTeX may load slightly after Reveal — wait for it, then scan
+     * the rendered slides for $...$ and $$...$$ blocks. */
+    function tryMath() {
+      if (typeof renderMathInElement === 'function') {
+        renderMathInElement(document.body, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '$',  right: '$',  display: false },
+            { left: '\\\\(', right: '\\\\)', display: false },
+            { left: '\\\\[', right: '\\\\]', display: true }
+          ],
+          ignoredTags: ['script','noscript','style','textarea','pre','code'],
+          throwOnError: false
+        });
+      } else {
+        setTimeout(tryMath, 80);
+      }
+    }
+    tryMath();${printMode ? `
+    setTimeout(() => window.print(), 800);` : ''}
+  });
 <\/script>
 </body>
 </html>`;
@@ -417,6 +502,105 @@ themeSelect.addEventListener('change', () => {
     renderPreview();
   }
 });
+
+/* Font picker ----------------------------------------------------- *
+ * Live-swap the Google Fonts <link> + override <style> in the iframe
+ * so the slide font changes without a re-render. Also injects a copy
+ * of the font into the editor page so the loaded font is cached when
+ * the user toggles around. Falls through to renderPreview if the
+ * iframe isn't there yet.
+ */
+function ensureFontLoadedInEditor(name) {
+  if (!name) return;
+  const id = 'editor-font-' + name.replace(/\W+/g, '-');
+  if (document.getElementById(id)) return;
+  const link = document.createElement('link');
+  link.id = id;
+  link.rel = 'stylesheet';
+  link.href = fontUrl(name);
+  document.head.appendChild(link);
+}
+
+fontSelect.addEventListener('change', () => {
+  currentFont = fontSelect.value;
+  ensureFontLoadedInEditor(currentFont);
+  const doc = preview.contentDocument;
+  if (!doc) { renderPreview(); return; }
+  const link  = doc.getElementById('font-link');
+  const style = doc.getElementById('font-style');
+  if (link)  link.href  = currentFont ? fontUrl(currentFont) : '';
+  if (style) style.textContent = fontOverrideCss(currentFont);
+});
+
+/* Image drag-and-drop → base64 ------------------------------------ *
+ *
+ * Drop an image anywhere over the editor section to insert
+ * ![filename](data:image/...;base64,...) at the cursor. Uses
+ * FileReader.readAsDataURL — fully local, no upload anywhere.
+ */
+function hasFiles(e) {
+  return !!(e.dataTransfer && e.dataTransfer.types &&
+            Array.prototype.includes.call(e.dataTransfer.types, 'Files'));
+}
+
+function fileToDataUri(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function insertAtCursor(text) {
+  editor.focus();
+  const start = editor.selectionStart ?? editor.value.length;
+  const end   = editor.selectionEnd   ?? editor.value.length;
+  const next  = editor.value.slice(0, start) + text + editor.value.slice(end);
+  editor.value = next;
+  const caret = start + text.length;
+  editor.selectionStart = editor.selectionEnd = caret;
+  scheduleRender();
+  trackCursorSlide();
+}
+
+editorSection.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  dropOverlay.classList.remove('hidden');
+});
+editorSection.addEventListener('dragover', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+editorSection.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth--;
+  if (dragDepth <= 0) { dragDepth = 0; dropOverlay.classList.add('hidden'); }
+});
+editorSection.addEventListener('drop', async (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  dragDepth = 0;
+  dropOverlay.classList.add('hidden');
+
+  const files = Array.from(e.dataTransfer.files || [])
+    .filter(f => f.type.startsWith('image/') || /\.(svg|png|jpe?g|gif|webp)$/i.test(f.name));
+  if (!files.length) return;
+
+  const inserts = [];
+  for (const file of files) {
+    try {
+      const data = await fileToDataUri(file);
+      const altText = file.name.replace(/\.[^.]+$/, '');
+      inserts.push(`![${altText}](${data})`);
+    } catch {/* skip unreadable file */}
+  }
+  if (inserts.length) insertAtCursor(inserts.join('\n\n') + '\n');
+}, true);  /* capture phase: beat the textarea's default drop */
 
 /* Open .md from disk ---------------------------------------------- *
  * Prefer the File System Access API (Chromium). Fall back to a hidden
