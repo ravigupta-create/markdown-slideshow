@@ -40,9 +40,22 @@
     </span>
   </div>
   <div class="flex flex-wrap items-center gap-2">
+    <button id="openBtn"   class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600" title="Open a .md file from your computer">📂 Open .md</button>
+    <label class="inline-flex items-center gap-2 px-2 py-1 text-sm rounded-md bg-slate-700/60 border border-slate-600">
+      <span class="text-slate-300">Theme</span>
+      <select id="themeSelect"
+              class="bg-slate-900 border border-slate-600 rounded px-2 py-0.5 text-slate-100 text-sm focus:outline-none focus:border-emerald-500">
+        <option value="black">Black</option>
+        <option value="white">White</option>
+        <option value="league">League</option>
+        <option value="serif">Serif</option>
+      </select>
+    </label>
+    <span class="hidden md:inline-block w-px h-6 bg-slate-600 mx-1"></span>
     <button id="copyBtn"   class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">📋 Copy Markdown</button>
     <button id="pdfBtn"    class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">🖨️ Print to PDF</button>
     <button id="exportBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-semibold">⬇ Export Offline HTML</button>
+    <input id="fileFallback" type="file" accept=".md,.markdown,text/markdown,text/plain" class="hidden">
   </div>
 </header>
 
@@ -138,20 +151,28 @@ Press ↓ to navigate down, then → to continue.
 Happy presenting.`;
 
 const $ = (id) => document.getElementById(id);
-const editor      = $('editor');
-const preview     = $('preview');
-const charCountEl = $('charCount');
-const slideEl     = $('slideCount');
-const syncToggle  = $('syncToggle');
+const editor       = $('editor');
+const preview      = $('preview');
+const charCountEl  = $('charCount');
+const slideEl      = $('slideCount');
+const syncToggle   = $('syncToggle');
+const themeSelect  = $('themeSelect');
+const fileFallback = $('fileFallback');
+
+const VALID_THEMES = ['black', 'white', 'league', 'serif'];
+const themeUrl = (name) =>
+  `https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/${name}.css`;
 
 let currentBlobUrl = null;
 let renderTimer    = null;
+let currentTheme   = 'black';
 
 /* Build a complete, standalone HTML document that renders the deck.
  * Used for: the live preview iframe, the Print-to-PDF window, and the
  * Export Offline HTML download — exactly the same CDN bundle every time.
  */
-function buildPreviewDoc(markdown, { printMode = false } = {}) {
+function buildPreviewDoc(markdown, { printMode = false, theme = currentTheme } = {}) {
+  const safeTheme = VALID_THEMES.includes(theme) ? theme : 'black';
   // The Markdown is embedded in a <textarea data-template>. The only
   // sequence that could break out of it is "</textarea>". Escape it.
   const safeMd = String(markdown).replace(/<\/textarea>/gi, '<\\/textarea>');
@@ -174,10 +195,9 @@ function buildPreviewDoc(markdown, { printMode = false } = {}) {
 <title>Slides</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reset.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/black.css" id="theme">
+<link rel="stylesheet" href="${themeUrl(safeTheme)}" id="theme">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/monokai.css">
 ${printLink}
-<style>html,body{background:#191919;}</style>
 </head>
 <body${printMode ? ' class="print-pdf"' : ''}>
 <div class="reveal">
@@ -241,6 +261,65 @@ syncToggle.addEventListener('change', () => {
   if (syncToggle.checked) renderPreview();
 });
 $('refreshBtn').addEventListener('click', renderPreview);
+
+/* Theme picker ----------------------------------------------------- *
+ * Live-swap the theme stylesheet inside the iframe instead of
+ * rebuilding the doc — keeps the user on the current slide and avoids
+ * the brief reload flash. Falls back to a full re-render if the iframe
+ * isn't ready yet (first paint or after Refresh).
+ */
+themeSelect.addEventListener('change', () => {
+  currentTheme = themeSelect.value;
+  const link = preview.contentDocument && preview.contentDocument.getElementById('theme');
+  if (link) {
+    link.href = themeUrl(currentTheme);
+  } else {
+    renderPreview();
+  }
+});
+
+/* Open .md from disk ---------------------------------------------- *
+ * Prefer the File System Access API (Chromium). Fall back to a hidden
+ * <input type="file"> for Firefox / Safari.
+ */
+async function openMarkdownFile() {
+  try {
+    if ('showOpenFilePicker' in window) {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{
+          description: 'Markdown',
+          accept: { 'text/markdown': ['.md', '.markdown'], 'text/plain': ['.txt'] }
+        }],
+        excludeAcceptAllOption: false,
+        multiple: false
+      });
+      const file = await handle.getFile();
+      loadFileText(await file.text(), file.name);
+    } else {
+      fileFallback.value = '';
+      fileFallback.click();
+    }
+  } catch (err) {
+    if (err && err.name !== 'AbortError') {
+      alert('Could not open file: ' + err.message);
+    }
+  }
+}
+
+fileFallback.addEventListener('change', async () => {
+  const file = fileFallback.files && fileFallback.files[0];
+  if (!file) return;
+  loadFileText(await file.text(), file.name);
+});
+
+function loadFileText(text, name) {
+  editor.value = text;
+  updateStats();
+  renderPreview();
+  flashBtn($('openBtn'), `✓ ${name.length > 18 ? name.slice(0,15) + '…' : name}`);
+}
+
+$('openBtn').addEventListener('click', openMarkdownFile);
 
 /* Copy Markdown ---------------------------------------------------- */
 $('copyBtn').addEventListener('click', async () => {
