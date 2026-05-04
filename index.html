@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Markdown Slideshow</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
 <style>
   html, body { height: 100%; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -70,6 +71,7 @@
     <span class="hidden md:inline-block w-px h-6 bg-slate-600 mx-1"></span>
     <button id="presenterBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium" title="Open Presenter Console (current slide, next, timer, notes)">🎤 Presenter</button>
     <button id="copyBtn"   class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">📋 Copy Markdown</button>
+    <button id="shareBtn"  class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600" title="Compress the deck into a sharable URL — recipients see it instantly, no server needed">🔗 Share URL</button>
     <button id="pdfBtn"    class="btn px-3 py-1.5 text-sm rounded-md bg-slate-700 hover:bg-slate-600">🖨️ Print to PDF</button>
     <button id="exportBtn" class="btn px-3 py-1.5 text-sm rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-semibold">⬇ Export Offline HTML</button>
     <input id="fileFallback" type="file" accept=".md,.markdown,text/markdown,text/plain" class="hidden">
@@ -444,6 +446,7 @@ function writeNotesIntoSlide(idx, rawNotes) {
   suppressNotesIn = false;
 
   updateStats();
+  if (typeof scheduleSave === 'function') scheduleSave();
   if (syncToggle.checked) {
     clearTimeout(renderTimer);
     renderTimer = setTimeout(renderPreview, 220);
@@ -462,9 +465,11 @@ function trackCursorSlide() {
   refreshNotesPanel();
 }
 
-/* Debounced re-render driven by typing + the Sync toggle. */
+/* Debounced re-render driven by typing + the Sync toggle.
+ * Also drives the localStorage auto-save (defined further down). */
 function scheduleRender() {
   updateStats();
+  if (typeof scheduleSave === 'function') scheduleSave();
   if (!syncToggle.checked) return;
   clearTimeout(renderTimer);
   renderTimer = setTimeout(renderPreview, 220);
@@ -642,6 +647,7 @@ function loadFileText(text, name) {
   updateStats();
   refreshNotesPanel();
   renderPreview();
+  if (typeof scheduleSave === 'function') scheduleSave();
   flashBtn($('openBtn'), `✓ ${name.length > 18 ? name.slice(0,15) + '…' : name}`);
 }
 
@@ -899,8 +905,137 @@ function flashBtn(btn, text) {
   }, 1200);
 }
 
-/* Boot ------------------------------------------------------------- */
-editor.value = SAMPLE;
+/* Persistence + URL sharing -------------------------------------- *
+ *
+ * Two complementary stores:
+ *   • localStorage — auto-saves on every edit; survives refresh.
+ *   • URL hash     — pako-deflated + base64url-encoded markdown,
+ *                    plus theme/font params; lets you ship a deck
+ *                    in a single link with no server.
+ */
+const STORAGE_KEY = 'markdown-slideshow:v1';
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      md:    editor.value,
+      theme: currentTheme,
+      font:  currentFont,
+      sync:  syncToggle.checked,
+      ts:    Date.now()
+    }));
+  } catch { /* QuotaExceeded etc. — fail silently */ }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    return obj && typeof obj.md === 'string' ? obj : null;
+  } catch { return null; }
+}
+
+let saveTimer = null;
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 400);
+}
+
+/* base64url <-> Uint8Array — URL-safe, no padding. */
+function bytesToB64Url(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64UrlToBytes(s) {
+  const pad = (4 - (s.length % 4)) % 4;
+  const b64 = (s + '='.repeat(pad)).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function buildShareUrl() {
+  if (typeof pako === 'undefined') return null;
+  const bytes = pako.deflate(new TextEncoder().encode(editor.value), { level: 9 });
+  const m = bytesToB64Url(bytes);
+  const params = new URLSearchParams();
+  params.set('m', m);
+  if (currentTheme && currentTheme !== 'black') params.set('t', currentTheme);
+  if (currentFont) params.set('f', currentFont);
+  return location.origin + location.pathname + '#' + params.toString();
+}
+
+function readSharedFromUrl() {
+  if (typeof pako === 'undefined') return null;
+  const hash = location.hash.replace(/^#/, '');
+  if (!hash) return null;
+  const params = new URLSearchParams(hash);
+  const m = params.get('m');
+  if (!m) return null;
+  try {
+    const bytes = b64UrlToBytes(m);
+    const md    = new TextDecoder().decode(pako.inflate(bytes));
+    return {
+      md,
+      theme: VALID_THEMES.includes(params.get('t')) ? params.get('t') : null,
+      font:  VALID_FONTS.includes(params.get('f'))  ? params.get('f')  : null
+    };
+  } catch {
+    return null;
+  }
+}
+
+$('shareBtn').addEventListener('click', async () => {
+  const btn = $('shareBtn');
+  const url = buildShareUrl();
+  if (!url) { alert('Compression library still loading — try again in a second.'); return; }
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    /* clipboard blocked — show a prompt fallback */
+    window.prompt('Copy this share URL:', url);
+  }
+  const kb = (url.length / 1024).toFixed(1);
+  flashBtn(btn, url.length > 8000 ? `✓ Copied (${kb} KB · long!)` : `✓ Copied ${kb} KB`);
+});
+
+/* Pull saves through the change pipelines. (scheduleRender already
+ * calls scheduleSave internally — see definition above.) */
+themeSelect.addEventListener('change', scheduleSave);
+fontSelect.addEventListener('change', scheduleSave);
+syncToggle.addEventListener('change', scheduleSave);
+
+/* Boot ------------------------------------------------------------- *
+ *
+ * Priority: shared URL → localStorage → built-in sample.
+ * If we loaded from URL, we *also* write to localStorage and clear
+ * the hash so a manual refresh keeps the user's edits instead of
+ * snapping back to whatever was in the link.
+ */
+const shared = readSharedFromUrl();
+const saved  = shared ? null : loadState();
+
+if (shared) {
+  editor.value = shared.md;
+  if (shared.theme) { currentTheme = shared.theme; themeSelect.value = currentTheme; }
+  if (shared.font)  { currentFont  = shared.font;  fontSelect.value  = currentFont; }
+  saveState();
+  history.replaceState(null, '', location.pathname);
+} else if (saved) {
+  editor.value = saved.md || SAMPLE;
+  if (VALID_THEMES.includes(saved.theme)) { currentTheme = saved.theme; themeSelect.value = currentTheme; }
+  if (VALID_FONTS.includes(saved.font))   { currentFont  = saved.font;  fontSelect.value  = currentFont; }
+  if (typeof saved.sync === 'boolean')    { syncToggle.checked = saved.sync; }
+} else {
+  editor.value = SAMPLE;
+}
+
 updateStats();
 refreshNotesPanel();
 renderPreview();
